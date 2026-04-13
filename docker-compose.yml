@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with PostGIS
+  postgres:
+    image: postgis/postgis:15-3.4
+    container_name: royal_shield_postgres
+    environment:
+      POSTGRES_DB: royal_shield_risk_db
+      POSTGRES_USER: royal_shield
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./services/geospatial/database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    networks:
+      - royal_shield_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U royal_shield"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: royal_shield_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - royal_shield_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API
+  api:
+    build: .
+    container_name: royal_shield_api
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - royal_shield_network
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery worker for async tasks
+  celery_worker:
+    build: .
+    container_name: royal_shield_celery
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - royal_shield_network
+    command: celery -A services.tasks worker --loglevel=info
+
+  # Celery beat for scheduled tasks
+  celery_beat:
+    build: .
+    container_name: royal_shield_celery_beat
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - royal_shield_network
+    command: celery -A services.tasks beat --loglevel=info
+
+  # pgAdmin (optional - for database management)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: royal_shield_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@royalshield.com
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    networks:
+      - royal_shield_network
+    profiles:
+      - dev
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  royal_shield_network:
+    driver: bridge
